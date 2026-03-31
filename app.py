@@ -412,4 +412,5 @@ def webhook():
 if __name__ == "__main__":
     _ensure_scheduler()
     log.info(f"🚀 Bot starting | instance={INSTANCE} | port={PORT}")
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=PORT)
