@@ -39,10 +39,19 @@ log = logging.getLogger("fitness-bot")
 app = Flask(__name__)
 
 scheduler = BackgroundScheduler(daemon=True)
-scheduler.start()
+_scheduler_started = False
 
 # Track greeted users (in-memory)
-greeted_users: set[str] = set()
+greeted_users: set = set()
+
+
+def _ensure_scheduler():
+    """Start the scheduler lazily (safe for Gunicorn fork)."""
+    global _scheduler_started
+    if not _scheduler_started:
+        scheduler.start()
+        _scheduler_started = True
+        log.info("⏱ Scheduler started")
 
 
 # ══════════════════════════════════════════════
@@ -175,7 +184,7 @@ OPTION_5 = [
 ]
 
 # Global option map
-OPTIONS: dict[str, list[str]] = {
+OPTIONS = {
     "1": OPTION_1,
     "2": OPTION_2,
     "3": OPTION_3,
@@ -188,7 +197,7 @@ OPTIONS: dict[str, list[str]] = {
 #  EVOLUTION API — SEND FUNCTION
 # ══════════════════════════════════════════════
 
-def send_text(remote_jid: str, text: str) -> bool:
+def send_text(remote_jid, text):
     """
     Send a text message via Evolution API.
     POST {EVOLUTION_API_URL}/message/sendText/{INSTANCE}
@@ -224,7 +233,7 @@ def send_text(remote_jid: str, text: str) -> bool:
         return False
 
 
-def send_sequence(remote_jid: str, messages: list[str], gap: float = 1.5):
+def send_sequence(remote_jid, messages, gap=1.5):
     """Send multiple messages in order with a small delay between each."""
     for i, msg in enumerate(messages):
         if i > 0:
@@ -236,8 +245,9 @@ def send_sequence(remote_jid: str, messages: list[str], gap: float = 1.5):
 #  FOLLOW-UP SCHEDULER
 # ══════════════════════════════════════════════
 
-def schedule_followup(remote_jid: str, text: str, delay: int = FOLLOWUP_DELAY):
+def schedule_followup(remote_jid, text, delay=FOLLOWUP_DELAY):
     """Schedule a delayed follow-up. Replaces any pending one for the same user."""
+    _ensure_scheduler()
     job_id = f"followup_{remote_jid}"
 
     existing = scheduler.get_job(job_id)
@@ -263,7 +273,7 @@ def schedule_followup(remote_jid: str, text: str, delay: int = FOLLOWUP_DELAY):
 #  CORE MESSAGE HANDLER (STATELESS)
 # ══════════════════════════════════════════════
 
-def handle_message(remote_jid: str, text: str):
+def handle_message(remote_jid, text):
     """
     Stateless handler:
       • If text is "1"–"5" → fire corresponding response immediately.
@@ -299,7 +309,7 @@ def handle_message(remote_jid: str, text: str):
 #  WEBHOOK PAYLOAD PARSER (EVOLUTION API)
 # ══════════════════════════════════════════════
 
-def parse_evolution_payload(data: dict) -> tuple[str | None, str | None]:
+def parse_evolution_payload(data):
     """
     Extract (remoteJid, text) from an Evolution API webhook event.
 
@@ -354,6 +364,12 @@ def parse_evolution_payload(data: dict) -> tuple[str | None, str | None]:
 #  FLASK ROUTES
 # ══════════════════════════════════════════════
 
+@app.before_request
+def _startup():
+    """Ensure scheduler is running (safe for Gunicorn workers)."""
+    _ensure_scheduler()
+
+
 @app.route("/", methods=["GET"])
 def health():
     """Health-check for Railway."""
@@ -394,5 +410,6 @@ def webhook():
 # ══════════════════════════════════════════════
 
 if __name__ == "__main__":
+    _ensure_scheduler()
     log.info(f"🚀 Bot starting | instance={INSTANCE} | port={PORT}")
     app.run(host="0.0.0.0", port=PORT, debug=False)
