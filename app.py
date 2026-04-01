@@ -21,7 +21,7 @@ EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "")       # Global or instanc
 INSTANCE = os.getenv("INSTANCE", "")                         # Instance name on Evolution API
 
 PORT = int(os.getenv("PORT", 5000))
-FOLLOWUP_DELAY = int(os.getenv("FOLLOWUP_DELAY", 300))      # seconds (default 5 min)
+FOLLOWUP_DELAY = int(os.getenv("FOLLOWUP_DELAY", 600))      # seconds (default 10 min)
 
 # ──────────────────────────────────────────────
 # Logging
@@ -93,8 +93,9 @@ OPTION_1 = [
         "Sem pressão, tá? Se fizer sentido pra você, já conseguimos ver a melhor posição para sua "
         "marca dentro do evento."
     ),
-    "Garantiu seu Stand na Fitness Bahia Expo 2026? Ficou com alguma dúvida?",
 ]
+
+OPTION_1_FOLLOWUP = "Garantiu seu Stand na Fitness Bahia Expo 2026? Ficou com alguma dúvida?"
 
 # ── Option 2 — Workshops ──
 OPTION_2 = [
@@ -111,8 +112,9 @@ OPTION_2 = [
         "Ou fale com um de nossos vendedores, vamos te ajudar a garantir a sua vaga:\n"
         "👉 Oséas Augusto: 73 9975-2416 | André Quebranca: 73 9953-0217"
     ),
-    "Conseguiu finalizar sua inscrição nos Workshops da Fitness Bahia Expo 2026? Ficou com alguma dúvida?",
 ]
+
+OPTION_2_FOLLOWUP = "Conseguiu finalizar sua inscrição nos Workshops da Fitness Bahia Expo 2026? Ficou com alguma dúvida?"
 
 # ── Option 3 — Concurso ──
 OPTION_3 = [
@@ -197,6 +199,29 @@ OPTIONS = {
 #  EVOLUTION API — SEND FUNCTION
 # ══════════════════════════════════════════════
 
+def send_presence(remote_jid, presence="composing"):
+    """
+    Send typing presence via Evolution API to simulate human typing.
+    """
+    if not EVOLUTION_API_URL or not INSTANCE:
+        return
+
+    number = remote_jid.replace("@s.whatsapp.net", "").strip()
+    url = f"{EVOLUTION_API_URL.rstrip('/')}/chat/sendPresence/{INSTANCE}"
+    headers = {
+        "Content-Type": "application/json",
+        "apikey": EVOLUTION_API_KEY,
+    }
+    payload = {
+        "number": number,
+        "delay": 3000,
+        "presence": presence,
+    }
+    try:
+        requests.post(url, json=payload, headers=headers, timeout=5)
+    except Exception as exc:
+        log.error(f"Failed to send presence: {exc}")
+
 def send_text(remote_jid, text):
     """
     Send a text message via Evolution API.
@@ -221,6 +246,9 @@ def send_text(remote_jid, text):
     payload = {
         "number": number,
         "text": text,
+        "options": {
+            "linkPreview": False
+        }
     }
 
     try:
@@ -233,8 +261,13 @@ def send_text(remote_jid, text):
         return False
 
 
-def send_sequence(remote_jid, messages, gap=1.5):
+def send_sequence(remote_jid, messages, is_delayed=False, gap=1.5):
     """Send multiple messages in order with a small delay between each."""
+    if is_delayed:
+        # Simulate typing for 3 seconds before sending the message sequence
+        send_presence(remote_jid, "composing")
+        time.sleep(3)
+
     for i, msg in enumerate(messages):
         if i > 0:
             time.sleep(gap)
@@ -244,6 +277,15 @@ def send_sequence(remote_jid, messages, gap=1.5):
 # ══════════════════════════════════════════════
 #  FOLLOW-UP SCHEDULER
 # ══════════════════════════════════════════════
+
+def cancel_followup(remote_jid):
+    """Cancel a pending follow-up job for a user if they reply."""
+    _ensure_scheduler()
+    job_id = f"followup_{remote_jid}"
+    existing = scheduler.get_job(job_id)
+    if existing:
+        existing.remove()
+        log.info(f"🚫 Canceled pending follow-up for {remote_jid} due to user interaction")
 
 def schedule_followup(remote_jid, text, delay=FOLLOWUP_DELAY):
     """Schedule a delayed follow-up. Replaces any pending one for the same user."""
@@ -273,22 +315,21 @@ def schedule_followup(remote_jid, text, delay=FOLLOWUP_DELAY):
 #  CORE MESSAGE HANDLER (STATELESS)
 # ══════════════════════════════════════════════
 
-def handle_message(remote_jid, text):
+def bg_process_message(remote_jid, cleaned):
     """
-    Stateless handler:
-      • If text is "1"–"5" → fire corresponding response immediately.
-      • Option 3 also schedules a 5-min follow-up.
-      • Any other text → greeting (first time) or fallback menu (repeat).
-      • State resets after every response — user can switch options freely.
+    Process message in background to avoid blocking the webhook worker.
     """
-    cleaned = text.strip()
-    log.info(f"← {remote_jid}: {cleaned}")
-
     # ── Global numeric command ──
     if cleaned in OPTIONS:
-        send_sequence(remote_jid, OPTIONS[cleaned])
+        # Options 1 and 5 invoke the typing delay
+        is_delayed = (cleaned in ["1", "5"])
+        send_sequence(remote_jid, OPTIONS[cleaned], is_delayed=is_delayed)
 
-        if cleaned == "3":
+        if cleaned == "1":
+            schedule_followup(remote_jid, OPTION_1_FOLLOWUP)
+        elif cleaned == "2":
+            schedule_followup(remote_jid, OPTION_2_FOLLOWUP)
+        elif cleaned == "3":
             schedule_followup(remote_jid, OPTION_3_FOLLOWUP)
 
         greeted_users.add(remote_jid)
@@ -303,6 +344,22 @@ def handle_message(remote_jid, text):
     else:
         send_text(remote_jid, FALLBACK)
         log.info(f"Fallback menu re-sent → {remote_jid}")
+
+
+def handle_message(remote_jid, text):
+    """
+    Stateless handler:
+      • Cancels any pending follow-up jobs immediately.
+      • Schedules the background processing so webhook can return 200 OK instantly.
+    """
+    cleaned = text.strip()
+    log.info(f"← {remote_jid}: {cleaned}")
+    
+    # Cancel any followups since the user replied
+    cancel_followup(remote_jid)
+    
+    # Delegate to background thread
+    scheduler.add_job(bg_process_message, args=[remote_jid, cleaned])
 
 
 # ══════════════════════════════════════════════
