@@ -323,7 +323,12 @@ def bg_process_message(remote_jid, cleaned):
     if cleaned in OPTIONS:
         # Options 1 and 5 invoke the typing delay
         is_delayed = (cleaned in ["1", "5"])
-        send_sequence(remote_jid, OPTIONS[cleaned], is_delayed=is_delayed)
+        
+        # Append the support message to the chosen sequence
+        sequence = list(OPTIONS[cleaned])
+        sequence.append("Nosso time de suporte entrará em contato com você em breve para dar continuidade ao seu atendimento. Fique de olho no seu WhatsApp! 😉")
+        
+        send_sequence(remote_jid, sequence, is_delayed=is_delayed)
 
         if cleaned == "1":
             schedule_followup(remote_jid, OPTION_1_FOLLOWUP)
